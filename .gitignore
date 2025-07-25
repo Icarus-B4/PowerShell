@@ -7,6 +7,11 @@ project.lock.json
 /staging/
 /Packages/
 *.nuget.props
+.env
+.env.test
+.env.prod   
+.env.local
+
 
 # dotnet cli install/uninstall scripts
 dotnet-install.ps1
