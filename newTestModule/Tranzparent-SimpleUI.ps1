@@ -1,18 +1,17 @@
 # SimpleUI.ps1
 # Ein einfaches Skript zum Starten der Chat-Benutzeroberfläche
 
-# Module importieren (falls noch nicht geladen)
+# Module importieren - Erzwinge Neuladen
+# Entferne alte Versionen
+Remove-Module ChatAssistant -Force -ErrorAction SilentlyContinue
+
 # Hauptmodul laden
-if (-not (Get-Module -Name ChatAssistant)) {
-    if (Test-Path -Path "$PSScriptRoot\ChatAssistant.psm1") {
-        Import-Module "$PSScriptRoot\ChatAssistant.psm1" -Force
-    } else {
-        Import-Module ChatAssistant -ErrorAction SilentlyContinue
-        if (-not (Get-Module -Name ChatAssistant)) {
-            Write-Host 'ChatAssistant-Modul nicht gefunden. Bitte installieren Sie es zuerst.' -ForegroundColor Red
-            exit
-        }
-    }
+if (Test-Path -Path "$PSScriptRoot\ChatAssistant.psm1") {
+    Import-Module "$PSScriptRoot\ChatAssistant.psm1" -Force
+    Write-Host "ChatAssistant-Modul geladen von: $PSScriptRoot\ChatAssistant.psm1" -ForegroundColor Green
+} else {
+    Write-Host 'ChatAssistant.psm1 nicht gefunden im aktuellen Verzeichnis.' -ForegroundColor Red
+    exit
 }
 
 # Erweiterungsmodul laden
@@ -31,7 +30,7 @@ if (-not (Get-Module -Name ChatAssistant.Extension)) {
 if (Get-Module -Name ChatAssistant.Extension) {
     # Standardpfad für Artefakte festlegen
     $artifactsPath = Join-Path -Path $env:USERPROFILE -ChildPath "ChatAssistant_Artifacts"
-    
+
     # Terminalbefehle und Canvas Preview aktivieren
     Set-ChatTerminalCommands -Enable $true
     Set-ChatCanvasPreview -Enable $true -ArtifactsPath $artifactsPath
@@ -55,9 +54,9 @@ if (-not $apiKey) {
     Write-Host "1. OpenAI API-Key eingeben (wird gespeichert)" -ForegroundColor Cyan
     Write-Host "2. Beispiel-API-Key verwenden (nur für Tests, wird nicht gespeichert)" -ForegroundColor Cyan
     Write-Host "3. Abbrechen" -ForegroundColor Cyan
-    
+
     $option = Read-Host "Bitte wählen Sie (1, 2 oder 3)"
-    
+
     switch ($option) {
         "1" {
             $apiKey = Read-Host -Prompt "Bitte geben Sie Ihren OpenAI API-Key ein"
@@ -127,7 +126,7 @@ $script:dragStartPoint = New-Object System.Drawing.Point(0, 0)
 
 # Hauptfenster erstellen
 $form = New-Object System.Windows.Forms.Form
-$form.Text = 'PowerShell Chat-Assistent'
+$form.Text = 'Omni PowerShell Chat-Assistent'
 $form.Size = New-Object System.Drawing.Size(800, 600)
 $form.StartPosition = 'CenterScreen' # Zentrierte Positionierung
 $form.BackColor = [System.Drawing.Color]::FromArgb(5, 5, 5) # Extrem dunkler Hintergrund für bessere Transparenz
@@ -151,7 +150,7 @@ $form.Controls.Add($titleBar)
 
 # Titel-Label hinzufügen
 $titleLabel = New-Object System.Windows.Forms.Label
-$titleLabel.Text = 'PowerShell Chat-Assistent'
+$titleLabel.Text = 'Omni PowerShell Chat-Assistent'
 $titleLabel.Location = New-Object System.Drawing.Point(10, 5)
 $titleLabel.Size = New-Object System.Drawing.Size(300, 20)
 $titleLabel.ForeColor = [System.Drawing.Color]::White
@@ -304,25 +303,25 @@ $canvasButton.Add_Click({
     # Prüfe, ob Code im Chat vorhanden ist
     $chatText = $chatBox.Text
     $codeMatches = [regex]::Matches($chatText, '```(\w+)\r?\n(.+?)\r?\n```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-    
+
     if ($codeMatches.Count -gt 0) {
         # Verwende den letzten gefundenen Code-Block
         $lastMatch = $codeMatches[$codeMatches.Count - 1]
         $language = $lastMatch.Groups[1].Value.Trim()
         $code = $lastMatch.Groups[2].Value.Trim()
-        
+
         $script:lastGeneratedCode = $code
         $script:lastCodeLanguage = $language
-        
+
         try {
             $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
             $fileName = "artifact_${language}_${timestamp}"
-            
+
             $result = New-ChatCanvasPreview -Code $code -Language $language -FileName $fileName -OpenPreview
-            
+
             $chatBox.SelectionColor = [System.Drawing.Color]::Orange
             $chatBox.AppendText("Canvas Preview erstellt: $($result.Message)`r`n`r`n")
-            
+
             # Scroll to end
             $chatBox.SelectionStart = $chatBox.Text.Length
             $chatBox.ScrollToCaret()
@@ -343,16 +342,16 @@ $terminalButton.Add_Click({
     # Prüfe, ob PowerShell-Code im Chat vorhanden ist
     $chatText = $chatBox.Text
     $psMatches = [regex]::Matches($chatText, '```(?:powershell|ps1)\r?\n(.+?)\r?\n```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-    
+
     if ($psMatches.Count -gt 0) {
         # Verwende den letzten PowerShell Code-Block
         $lastMatch = $psMatches[$psMatches.Count - 1]
         $command = $lastMatch.Groups[1].Value.Trim()
-        
+
         $chatBox.SelectionColor = [System.Drawing.Color]::Yellow
         $chatBox.AppendText("System: Gefundener PowerShell-Befehl wird ausgeführt...`r`n")
         $chatBox.AppendText("$command`r`n`r`n")
-        
+
         try {
             $result = Invoke-ChatTerminalCommand -Command $command
             $chatBox.SelectionColor = [System.Drawing.Color]::Green
@@ -361,7 +360,7 @@ $terminalButton.Add_Click({
             $chatBox.SelectionColor = [System.Drawing.Color]::Red
             $chatBox.AppendText("Terminal-Fehler: $($_.Exception.Message)`r`n`r`n")
         }
-        
+
         # Scroll to end
         $chatBox.SelectionStart = $chatBox.Text.Length
         $chatBox.ScrollToCaret()
@@ -382,11 +381,39 @@ $sendButton.Add_Click({
         $chatBox.AppendText("Sie: ${message}`r`n`r`n")
         $inputBox.Clear()
 
-        # Antwort vom Assistenten abrufen
+        # Intelligente Antwort vom Assistenten abrufen (PowerShellGPT-Style)
         try {
-            $response = Invoke-ChatAssistant -Prompt $message -ErrorAction Stop
-            $chatBox.SelectionColor = [System.Drawing.Color]::LightGreen
-            $chatBox.AppendText("Assistent: ${response}`r`n`r`n")
+            # Prüfe, ob es sich um einen einfachen PowerShell-Befehl handelt
+            if ($message -match '^\s*([a-zA-Z0-9-_]+)\s*(.*)?$') {
+                $commandName = $matches[1]
+                $commandArgs = if ($matches[2]) { $matches[2].Trim() } else { "" }
+
+                # Prüfe, ob es ein bekannter PowerShell-Befehl ist
+                $cmdletInfo = Get-Command $commandName -ErrorAction SilentlyContinue
+                if ($cmdletInfo) {
+                    # Es ist ein PowerShell-Befehl - führe ihn aus
+                    $fullCommand = if ($commandArgs) { "$commandName $commandArgs" } else { $commandName }
+
+                    try {
+                        $result = Invoke-SafePowerShellCommand -Command $fullCommand -ErrorAction Stop
+                        $chatBox.SelectionColor = [System.Drawing.Color]::Cyan
+                        $chatBox.AppendText("Terminal: ${result}`r`n`r`n")
+                    } catch {
+                        $chatBox.SelectionColor = [System.Drawing.Color]::Red
+                        $chatBox.AppendText("Terminal-Fehler: $($_.Exception.Message)`r`n`r`n")
+                    }
+                } else {
+                    # Kein PowerShell-Befehl - verwende AI-Chat
+                    $response = Invoke-ChatAssistant -Prompt $message -ErrorAction Stop
+                    $chatBox.SelectionColor = [System.Drawing.Color]::LightGreen
+                    $chatBox.AppendText("Assistent: ${response}`r`n`r`n")
+                }
+            } else {
+                # Komplexere Eingabe - verwende AI-Chat
+                $response = Invoke-ChatAssistant -Prompt $message -ErrorAction Stop
+                $chatBox.SelectionColor = [System.Drawing.Color]::LightGreen
+                $chatBox.AppendText("Assistent: ${response}`r`n`r`n")
+            }
         } catch {
             $chatBox.SelectionColor = [System.Drawing.Color]::Red
             $chatBox.AppendText("Fehler: $($_.Exception.Message)`r`n`r`n")
@@ -424,9 +451,27 @@ $inputBox.Add_LostFocus({
 
 # Event-Handler für Textänderungen
 $inputBox.Add_TextChanged({
-    # Textfarbe auf weiß setzen wenn der Benutzer tippt
+    # Cursor-Timer stoppen wenn der Benutzer tippt
     if ($inputBox.Text.Length -gt 0 -and $inputBox.Text -ne "|") {
+        $cursorTimer.Stop()
         $inputBox.ForeColor = [System.Drawing.Color]::White
+        $script:cursorVisible = $false
+    }
+    elseif ($inputBox.Text.Length -eq 0) {
+        # Cursor-Timer wieder starten wenn leer
+        $script:cursorVisible = $true
+        $cursorTimer.Start()
+    }
+})
+
+# Event-Handler für Tastatur-Eingaben
+$inputBox.Add_KeyPress({
+    # Bei jeder Tasteneingabe Cursor entfernen
+    if ($inputBox.Text -eq "|") {
+        $inputBox.Text = ""
+        $inputBox.ForeColor = [System.Drawing.Color]::White
+        $cursorTimer.Stop()
+        $script:cursorVisible = $false
     }
 })
 
@@ -459,7 +504,7 @@ $form.Add_Shown({
     # Runde Ecken für das Hauptfenster erstellen
     $roundedRegion = [RoundedWindow]::CreateRoundRectRgn(0, 0, $form.Width, $form.Height, 20, 20)
     [RoundedWindow]::SetWindowRgn($form.Handle, $roundedRegion, $true)
-    
+
     # Fokus auf das Eingabefeld setzen
     $inputBox.Focus()
 })
@@ -483,7 +528,7 @@ $form.Add_Resize({
     $inputBox.Width = ([int]$form.ClientSize.Width - 120)
 
     $sendButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 100), ([int]$form.ClientSize.Height - 50))
-    
+
     # Runde Ecken nach Größenänderung neu anwenden
     $roundedRegion = [RoundedWindow]::CreateRoundRectRgn(0, 0, $form.Width, $form.Height, 20, 20)
     [RoundedWindow]::SetWindowRgn($form.Handle, $roundedRegion, $true)
