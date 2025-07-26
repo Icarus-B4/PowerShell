@@ -1,7 +1,8 @@
 # SimpleUI.ps1
 # Ein einfaches Skript zum Starten der Chat-Benutzeroberfläche
 
-# Modul importieren (falls noch nicht geladen)
+# Module importieren (falls noch nicht geladen)
+# Hauptmodul laden
 if (-not (Get-Module -Name ChatAssistant)) {
     if (Test-Path -Path "$PSScriptRoot\ChatAssistant.psm1") {
         Import-Module "$PSScriptRoot\ChatAssistant.psm1" -Force
@@ -14,15 +15,45 @@ if (-not (Get-Module -Name ChatAssistant)) {
     }
 }
 
-# API-Key überprüfen und ggf. abfragen
-try {
-    $config = Get-ChatAssistantConfig -ErrorAction Stop
-    if (-not $config.ApiKey) { throw }
-} catch {
-    # Zeige Optionen für API-Key-Eingabe
+# Erweiterungsmodul laden
+if (-not (Get-Module -Name ChatAssistant.Extension)) {
+    if (Test-Path -Path "$PSScriptRoot\ChatAssistant.Extension.psm1") {
+        Import-Module "$PSScriptRoot\ChatAssistant.Extension.psm1" -Force
+    } else {
+        Import-Module ChatAssistant.Extension -ErrorAction SilentlyContinue
+        if (-not (Get-Module -Name ChatAssistant.Extension)) {
+            Write-Host 'ChatAssistant.Extension-Modul nicht gefunden. Einige Funktionen werden nicht verfügbar sein.' -ForegroundColor Yellow
+        }
+    }
+}
+
+# Erweiterungsfunktionen aktivieren
+if (Get-Module -Name ChatAssistant.Extension) {
+    # Standardpfad für Artefakte festlegen
+    $artifactsPath = Join-Path -Path $env:USERPROFILE -ChildPath "ChatAssistant_Artifacts"
+    
+    # Terminalbefehle und Canvas Preview aktivieren
+    Set-ChatTerminalCommands -Enable $true
+    Set-ChatCanvasPreview -Enable $true -ArtifactsPath $artifactsPath
+}
+
+# Pfad zur Konfigurationsdatei für den API-Schlüssel
+$configFilePath = Join-Path -Path $env:USERPROFILE -ChildPath "ChatAssistant_ApiKey.txt"
+$apiKey = $null
+$keyJustEntered = $false # Hält fest, ob der Key gerade erst eingegeben wurde
+
+# Versuchen, den API-Key aus der lokalen Datei zu laden
+if (Test-Path $configFilePath) {
+    $apiKey = Get-Content -Path $configFilePath | Out-String
+    $apiKey = $apiKey.Trim()
+}
+
+# Wenn kein API-Key gefunden oder die Datei leer ist, den Benutzer fragen
+if (-not $apiKey) {
+    $keyJustEntered = $true
     Write-Host "Bitte wählen Sie eine Option:" -ForegroundColor Yellow
-    Write-Host "1. OpenAI API-Key eingeben" -ForegroundColor Cyan
-    Write-Host "2. Beispiel-API-Key verwenden (nur für Tests)" -ForegroundColor Cyan
+    Write-Host "1. OpenAI API-Key eingeben (wird gespeichert)" -ForegroundColor Cyan
+    Write-Host "2. Beispiel-API-Key verwenden (nur für Tests, wird nicht gespeichert)" -ForegroundColor Cyan
     Write-Host "3. Abbrechen" -ForegroundColor Cyan
     
     $option = Read-Host "Bitte wählen Sie (1, 2 oder 3)"
@@ -30,15 +61,21 @@ try {
     switch ($option) {
         "1" {
             $apiKey = Read-Host -Prompt "Bitte geben Sie Ihren OpenAI API-Key ein"
-            if (-not $apiKey) {
+            if ($apiKey) {
+                $apiKey = $apiKey.Trim()
+                # Speichere den API-Key für zukünftige Sitzungen
+                try {
+                    Set-Content -Path $configFilePath -Value $apiKey -ErrorAction Stop
+                    Write-Host "API-Key wurde in '$configFilePath' gespeichert." -ForegroundColor Green
+                } catch {
+                    Write-Host "Fehler beim Speichern des API-Keys: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            } else {
                 Write-Host "Kein API-Key angegeben. Beende Skript." -ForegroundColor Red
                 exit
             }
-            # Entferne Leerzeichen und Zeilenumbrüche
-            $apiKey = $apiKey.Trim()
         }
         "2" {
-            # Beispiel-API-Key für Tests
             $apiKey = "sk-example-api-key-for-testing-purposes-only"
         }
         "3" {
@@ -50,28 +87,39 @@ try {
             exit
         }
     }
-    
-    # Korrigierte Funktion verwenden
-    Set-ChatAssistantConfig -ApiKey $apiKey
-    Write-Host "API-Key wurde gespeichert." -ForegroundColor Green
+}
+
+# Setze den API-Key für das Modul in der aktuellen Sitzung
+if ($apiKey) {
+    try {
+        Set-ChatAssistantConfig -ApiKey $apiKey -ErrorAction Stop
+        if ($keyJustEntered) {
+            Write-Host "API-Key wurde für die aktuelle Sitzung festgelegt." -ForegroundColor Green
+        }
+    } catch {
+        Write-Host "Fehler beim Festlegen des API-Keys für das Chat-Modul: $($_.Exception.Message)" -ForegroundColor Red
+    }
+} else {
+    Write-Host "Es wurde kein API-Key festgelegt. Das Skript wird möglicherweise nicht wie erwartet funktionieren." -ForegroundColor Yellow
 }
 
 # Windows Forms laden
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# P/Invoke-Deklaration für GetWindowRect (um die Position des Konsolenfensters zu ermitteln)
-# Korrigierte Version mit System.Drawing.Rectangle
+# P/Invoke-Deklarationen für runde Ecken
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 
-public class Win32 {
+public class RoundedWindow {
+    [DllImport("gdi32.dll")]
+    public static extern IntPtr CreateRoundRectRgn(int nLeftRect, int nTopRect, int nRightRect, int nBottomRect, int nWidthEllipse, int nHeightEllipse);
+
     [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    public static extern bool GetWindowRect(IntPtr hWnd, ref System.Drawing.Rectangle lpRect);
+    public static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
 }
-"@ -ReferencedAssemblies "System.Drawing", "System.Drawing.Primitives"
+"@
 
 # Globale Variablen für Drag-Funktionalität
 $script:isDragging = $false
@@ -96,7 +144,7 @@ $form.Font = $defaultFont
 # Titelleiste erstellen (zum Verschieben des Fensters)
 $titleBar = New-Object System.Windows.Forms.Panel
 $titleBar.Location = New-Object System.Drawing.Point(0, 0)
-$titleBarWidth = $form.ClientSize.Width
+$titleBarWidth = [int]$form.ClientSize.Width
 $titleBar.Size = New-Object System.Drawing.Size($titleBarWidth, 30)
 $titleBar.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) # Dunklerer Hintergrund für die Titelleiste
 $form.Controls.Add($titleBar)
@@ -109,11 +157,24 @@ $titleLabel.Size = New-Object System.Drawing.Size(300, 20)
 $titleLabel.ForeColor = [System.Drawing.Color]::White
 $titleBar.Controls.Add($titleLabel)
 
+# Minimieren-Button hinzufügen
+$minimizeButton = New-Object System.Windows.Forms.Button
+$minimizeButton.Text = '_'
+$minimizeButton.Size = New-Object System.Drawing.Size(30, 30)
+$minimizeButtonX = [int]$form.ClientSize.Width - 60
+$minimizeButton.Location = New-Object System.Drawing.Point($minimizeButtonX, 0)
+$minimizeButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$minimizeButton.FlatAppearance.BorderSize = 0
+$minimizeButton.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+$minimizeButton.ForeColor = [System.Drawing.Color]::White
+$minimizeButton.Add_Click({ $form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized })
+$titleBar.Controls.Add($minimizeButton)
+
 # Schließen-Button hinzufügen
 $closeButton = New-Object System.Windows.Forms.Button
 $closeButton.Text = 'X'
 $closeButton.Size = New-Object System.Drawing.Size(30, 30)
-$closeButtonX = $form.ClientSize.Width - 30
+$closeButtonX = [int]$form.ClientSize.Width - 30
 $closeButton.Location = New-Object System.Drawing.Point($closeButtonX, 0)
 $closeButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
 $closeButton.FlatAppearance.BorderSize = 0
@@ -149,43 +210,168 @@ $titleBar.Add_MouseUp({
     }
 })
 
+# Button-Panel erstellen
+$buttonPanel = New-Object System.Windows.Forms.Panel
+$buttonPanel.Location = New-Object System.Drawing.Point(10, 35)
+$buttonPanel.Size = New-Object System.Drawing.Size(([int]$form.ClientSize.Width - 20), 40)
+$form.Controls.Add($buttonPanel)
+
+# Canvas Preview Button erstellen
+$canvasButton = New-Object System.Windows.Forms.Button
+$canvasButton.Location = New-Object System.Drawing.Point(0, 0)
+$canvasButton.Size = New-Object System.Drawing.Size(90, 40)
+$canvasButton.Text = 'Canvas'
+$canvasButton.BackColor = [System.Drawing.Color]::FromArgb(255, 140, 0) # Orange für Canvas
+$canvasButton.ForeColor = [System.Drawing.Color]::White
+$canvasButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$canvasButton.FlatAppearance.BorderSize = 0
+$buttonPanel.Controls.Add($canvasButton)
+
+# Terminal Button erstellen
+$terminalButton = New-Object System.Windows.Forms.Button
+$terminalButton.Location = New-Object System.Drawing.Point(95, 0)
+$terminalButton.Size = New-Object System.Drawing.Size(90, 40)
+$terminalButton.Text = 'Terminal'
+$terminalButton.BackColor = [System.Drawing.Color]::FromArgb(34, 139, 34) # Grün für Terminal
+$terminalButton.ForeColor = [System.Drawing.Color]::White
+$terminalButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$terminalButton.FlatAppearance.BorderSize = 0
+$buttonPanel.Controls.Add($terminalButton)
+
 # Chat-Bereich erstellen
 $chatBox = New-Object System.Windows.Forms.RichTextBox
-$chatBox.Location = New-Object System.Drawing.Point(10, 40) # Mehr Platz oben für den Titelbereich
-$chatBoxWidth = $form.ClientSize.Width - 20
-$chatBoxHeight = $form.ClientSize.Height - 100
-$chatBox.Size = New-Object System.Drawing.Size($chatBoxWidth, $chatBoxHeight) # Dynamische Größe
-$chatBox.BackColor = [System.Drawing.Color]::FromArgb(15, 15, 15) # Dunkler Hintergrund für den Chat-Bereich
+$chatBox.Location = New-Object System.Drawing.Point(10, 80) # Unter dem neuen Button-Panel
+$chatBoxWidth = [int]$form.ClientSize.Width - 20
+$chatBoxHeight = [int]$form.ClientSize.Height - 140 # Höhe angepasst
+$chatBox.Size = New-Object System.Drawing.Size($chatBoxWidth, $chatBoxHeight)
+$chatBox.BackColor = [System.Drawing.Color]::FromArgb(15, 15, 15)
 $chatBox.ForeColor = [System.Drawing.Color]::White
 $chatBox.ReadOnly = $true
 $chatBox.Multiline = $true
-$chatBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None # Keine Ränder
+$chatBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
 $form.Controls.Add($chatBox)
 
 # Eingabefeld erstellen
 $inputBox = New-Object System.Windows.Forms.TextBox
-$inputBoxY = $form.ClientSize.Height - 50
-$inputBox.Location = New-Object System.Drawing.Point(10, $inputBoxY) # Am unteren Rand
-$inputBoxWidth = $form.ClientSize.Width - 120
-$inputBox.Size = New-Object System.Drawing.Size($inputBoxWidth, 40) # Dynamische Größe
-$inputBox.BackColor = [System.Drawing.Color]::FromArgb(10, 10, 10) # Dunklerer Hintergrund für das Eingabefeld
+$inputBoxY = [int]$form.ClientSize.Height - 50
+$inputBox.Location = New-Object System.Drawing.Point(10, $inputBoxY)
+$inputBoxWidth = [int]$form.ClientSize.Width - 120
+$inputBox.Size = New-Object System.Drawing.Size($inputBoxWidth, 40)
+$inputBox.BackColor = [System.Drawing.Color]::FromArgb(10, 10, 10)
 $inputBox.ForeColor = [System.Drawing.Color]::White
 $inputBox.Multiline = $true
-$inputBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None # Keine Ränder
+$inputBox.BorderStyle = [System.Windows.Forms.BorderStyle]::None
 $form.Controls.Add($inputBox)
+
+# Blinkender Cursor-Timer
+$script:cursorVisible = $true
+$cursorTimer = New-Object System.Windows.Forms.Timer
+$cursorTimer.Interval = 500 # 500ms Intervall
+$cursorTimer.Add_Tick({
+    # Nur blinken wenn das Eingabefeld leer ist und den Fokus hat
+    if ($inputBox.Text.Length -eq 0 -and $inputBox.Focused) {
+        if ($script:cursorVisible) {
+            $inputBox.Text = "|"
+            $inputBox.ForeColor = [System.Drawing.Color]::Gray
+            $script:cursorVisible = $false
+        } else {
+            $inputBox.Text = ""
+            $script:cursorVisible = $true
+        }
+    }
+})
+$cursorTimer.Start()
 
 # Senden-Button erstellen
 $sendButton = New-Object System.Windows.Forms.Button
-$sendButtonX = $form.ClientSize.Width - 100
-$sendButtonY = $form.ClientSize.Height - 50
-$sendButton.Location = New-Object System.Drawing.Point($sendButtonX, $sendButtonY) # Rechts neben dem Eingabefeld
-$sendButton.Size = New-Object System.Drawing.Size(90, 40) # Angepasste Größe
+$sendButtonX = [int]$form.ClientSize.Width - 100
+$sendButtonY = [int]$form.ClientSize.Height - 50
+$sendButton.Location = New-Object System.Drawing.Point($sendButtonX, $sendButtonY)
+$sendButton.Size = New-Object System.Drawing.Size(90, 40)
 $sendButton.Text = 'Senden'
-$sendButton.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212) # Blauer Button wie im ersten Bild
+$sendButton.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 212)
 $sendButton.ForeColor = [System.Drawing.Color]::White
-$sendButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat # Flacher Button-Stil für modernes Aussehen
-$sendButton.FlatAppearance.BorderSize = 0 # Keine Ränder für den Button
+$sendButton.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+$sendButton.FlatAppearance.BorderSize = 0
 $form.Controls.Add($sendButton)
+
+# Globale Variable für letzten generierten Code
+$script:lastGeneratedCode = $null
+$script:lastCodeLanguage = $null
+
+# Event-Handler für den Canvas Button
+$canvasButton.Add_Click({
+    # Prüfe, ob Code im Chat vorhanden ist
+    $chatText = $chatBox.Text
+    $codeMatches = [regex]::Matches($chatText, '```(\w+)\r?\n(.+?)\r?\n```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    
+    if ($codeMatches.Count -gt 0) {
+        # Verwende den letzten gefundenen Code-Block
+        $lastMatch = $codeMatches[$codeMatches.Count - 1]
+        $language = $lastMatch.Groups[1].Value.Trim()
+        $code = $lastMatch.Groups[2].Value.Trim()
+        
+        $script:lastGeneratedCode = $code
+        $script:lastCodeLanguage = $language
+        
+        try {
+            $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+            $fileName = "artifact_${language}_${timestamp}"
+            
+            $result = New-ChatCanvasPreview -Code $code -Language $language -FileName $fileName -OpenPreview
+            
+            $chatBox.SelectionColor = [System.Drawing.Color]::Orange
+            $chatBox.AppendText("Canvas Preview erstellt: $($result.Message)`r`n`r`n")
+            
+            # Scroll to end
+            $chatBox.SelectionStart = $chatBox.Text.Length
+            $chatBox.ScrollToCaret()
+        } catch {
+            $chatBox.SelectionColor = [System.Drawing.Color]::Red
+            $chatBox.AppendText("Fehler beim Erstellen der Canvas Preview: $($_.Exception.Message)`r`n`r`n")
+        }
+    } else {
+        $chatBox.SelectionColor = [System.Drawing.Color]::Yellow
+        $chatBox.AppendText("System: Kein Code-Block im Chat gefunden. Bitten Sie den Assistenten zuerst, Code zu generieren.`r`n`r`n")
+        $chatBox.SelectionStart = $chatBox.Text.Length
+        $chatBox.ScrollToCaret()
+    }
+})
+
+# Event-Handler für den Terminal Button
+$terminalButton.Add_Click({
+    # Prüfe, ob PowerShell-Code im Chat vorhanden ist
+    $chatText = $chatBox.Text
+    $psMatches = [regex]::Matches($chatText, '```(?:powershell|ps1)\r?\n(.+?)\r?\n```', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    
+    if ($psMatches.Count -gt 0) {
+        # Verwende den letzten PowerShell Code-Block
+        $lastMatch = $psMatches[$psMatches.Count - 1]
+        $command = $lastMatch.Groups[1].Value.Trim()
+        
+        $chatBox.SelectionColor = [System.Drawing.Color]::Yellow
+        $chatBox.AppendText("System: Gefundener PowerShell-Befehl wird ausgeführt...`r`n")
+        $chatBox.AppendText("$command`r`n`r`n")
+        
+        try {
+            $result = Invoke-ChatTerminalCommand -Command $command
+            $chatBox.SelectionColor = [System.Drawing.Color]::Green
+            $chatBox.AppendText("Terminal-Ausgabe:`r`n$result`r`n`r`n")
+        } catch {
+            $chatBox.SelectionColor = [System.Drawing.Color]::Red
+            $chatBox.AppendText("Terminal-Fehler: $($_.Exception.Message)`r`n`r`n")
+        }
+        
+        # Scroll to end
+        $chatBox.SelectionStart = $chatBox.Text.Length
+        $chatBox.ScrollToCaret()
+    } else {
+        $chatBox.SelectionColor = [System.Drawing.Color]::Yellow
+        $chatBox.AppendText("System: Kein PowerShell-Code im Chat gefunden. Bitten Sie den Assistenten, PowerShell-Code zu generieren.`r`n`r`n")
+        $chatBox.SelectionStart = $chatBox.Text.Length
+        $chatBox.ScrollToCaret()
+    }
+})
 
 # Event-Handler für den Senden-Button
 $sendButton.Add_Click({
@@ -212,11 +398,35 @@ $sendButton.Add_Click({
     }
 })
 
-# Event-Handler für das Eingabefeld (Enter-Taste)
+# Event-Handler für das Eingabefeld (Enter-Taste und Textänderungen)
 $inputBox.Add_KeyDown({
     if ($_.KeyCode -eq 'Enter' -and $_.Modifiers -eq 'None') {
         $sendButton.PerformClick()
         $_.SuppressKeyPress = $true
+    }
+})
+
+# Event-Handler für Fokus-Änderungen
+$inputBox.Add_GotFocus({
+    # Cursor-Text entfernen wenn Fokus erhalten
+    if ($inputBox.Text -eq "|") {
+        $inputBox.Text = ""
+        $inputBox.ForeColor = [System.Drawing.Color]::White
+    }
+})
+
+$inputBox.Add_LostFocus({
+    # Cursor wieder aktivieren wenn kein Text vorhanden
+    if ($inputBox.Text.Length -eq 0) {
+        $script:cursorVisible = $true
+    }
+})
+
+# Event-Handler für Textänderungen
+$inputBox.Add_TextChanged({
+    # Textfarbe auf weiß setzen wenn der Benutzer tippt
+    if ($inputBox.Text.Length -gt 0 -and $inputBox.Text -ne "|") {
+        $inputBox.ForeColor = [System.Drawing.Color]::White
     }
 })
 
@@ -227,25 +437,56 @@ $chatBox.AppendText("Assistent: Hallo! Wie kann ich Ihnen heute helfen?`r`n`r`n"
 # Event-Handler für Größenänderung des Formulars
 $form.Add_Resize({
     # Titelleiste anpassen
-    $titleBar.Width = $form.ClientSize.Width
-    $closeButtonX = $form.ClientSize.Width - 30
-    $closeButton.Location = New-Object System.Drawing.Point($closeButtonX, 0)
+    $titleBar.Width = [int]$form.ClientSize.Width
+    $closeButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 30), 0)
+
+    # Button-Panel anpassen
+    $buttonPanel.Width = ([int]$form.ClientSize.Width - 20)
 
     # Chat-Bereich anpassen
-    $chatBoxWidth = $form.ClientSize.Width - 20
-    $chatBoxHeight = $form.ClientSize.Height - 100
-    $chatBox.Width = $chatBoxWidth
-    $chatBox.Height = $chatBoxHeight
+    $chatBox.Width = ([int]$form.ClientSize.Width - 20)
+    $chatBox.Height = ([int]$form.ClientSize.Height - 140)
 
     # Eingabefeld und Senden-Button anpassen
-    $inputBoxY = $form.ClientSize.Height - 50
-    $inputBoxWidth = $form.ClientSize.Width - 120
-    $inputBox.Location = New-Object System.Drawing.Point(10, $inputBoxY)
-    $inputBox.Width = $inputBoxWidth
+    $inputBox.Location = New-Object System.Drawing.Point(10, ([int]$form.ClientSize.Height - 50))
+    $inputBox.Width = ([int]$form.ClientSize.Width - 120)
 
-    $sendButtonX = $form.ClientSize.Width - 100
-    $sendButtonY = $form.ClientSize.Height - 50
-    $sendButton.Location = New-Object System.Drawing.Point($sendButtonX, $sendButtonY)
+    $sendButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 100), ([int]$form.ClientSize.Height - 50))
+})
+
+# Runde Ecken anwenden
+$form.Add_Shown({
+    # Runde Ecken für das Hauptfenster erstellen
+    $roundedRegion = [RoundedWindow]::CreateRoundRectRgn(0, 0, $form.Width, $form.Height, 20, 20)
+    [RoundedWindow]::SetWindowRgn($form.Handle, $roundedRegion, $true)
+    
+    # Fokus auf das Eingabefeld setzen
+    $inputBox.Focus()
+})
+
+# Event-Handler für Größenänderung des Formulars - mit runden Ecken
+$form.Add_Resize({
+    # Titelleiste anpassen
+    $titleBar.Width = [int]$form.ClientSize.Width
+    $minimizeButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 60), 0)
+    $closeButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 30), 0)
+
+    # Button-Panel anpassen
+    $buttonPanel.Width = ([int]$form.ClientSize.Width - 20)
+
+    # Chat-Bereich anpassen
+    $chatBox.Width = ([int]$form.ClientSize.Width - 20)
+    $chatBox.Height = ([int]$form.ClientSize.Height - 140)
+
+    # Eingabefeld und Senden-Button anpassen
+    $inputBox.Location = New-Object System.Drawing.Point(10, ([int]$form.ClientSize.Height - 50))
+    $inputBox.Width = ([int]$form.ClientSize.Width - 120)
+
+    $sendButton.Location = New-Object System.Drawing.Point(([int]$form.ClientSize.Width - 100), ([int]$form.ClientSize.Height - 50))
+    
+    # Runde Ecken nach Größenänderung neu anwenden
+    $roundedRegion = [RoundedWindow]::CreateRoundRectRgn(0, 0, $form.Width, $form.Height, 20, 20)
+    [RoundedWindow]::SetWindowRgn($form.Handle, $roundedRegion, $true)
 })
 
 # Formular anzeigen
